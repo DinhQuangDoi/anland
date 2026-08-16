@@ -11,6 +11,7 @@
 #include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 struct display_ctx {
@@ -59,6 +60,25 @@ struct display_ctx {
     int             num_services;
     struct resources *resources;
 };
+
+/* Bound how long a write to a stream socket may block before send() returns an
+ * error. Without this, a producer that stops reading (e.g. while an input/IME key
+ * triggers a render stall) lets the kernel send buffer fill, and the main/UI thread
+ * blocks forever inside push_input_event -> send_all -> send(). That turns into an
+ * Android ANR ("Input dispatching timed out") and the activity is force-killed. With
+ * a send timeout, a stalled producer yields send()==-1 (EAGAIN/EWOULDBLOCK), the
+ * existing enter_fallback()/reconnect path runs, and the UI thread survives. The
+ * value is large enough to absorb normal bursts but far below the 5s ANR threshold. */
+static void set_data_send_timeout(int fd)
+{
+    if (fd < 0)
+        return;
+    struct timeval tv = {
+        .tv_sec  = 0,
+        .tv_usec = 500000, /* 500ms */
+    };
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
 
 /* (Re)arm the data_fd write gate for a fresh connected session: writers take
  * data_lock until every service's fds have been sent. Callers either hold data_lock
@@ -186,6 +206,7 @@ static int send_hello_fds(display_ctx *ctx)
     ctx->data_fd  = sv[0];
     ctx->fence_fd = fv[0];
     ctx->audio_fd = av[0];
+    set_data_send_timeout(ctx->data_fd);
 
     struct ctrl_msg hdr = { .type = CTRL_MSG_CONSUMER_HELLO, .size = 0 };
     int fds[5] = { ctx->buf_ready_efd, fv[1], sv[1], ctx->shm_fd, av[1] };
