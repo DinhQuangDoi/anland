@@ -38,6 +38,8 @@ import android.widget.FrameLayout;
 import android.util.DisplayMetrics;   // ADDED
 
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 
 public class MainActivity extends Activity
@@ -46,16 +48,31 @@ public class MainActivity extends Activity
 
     private SurfaceView surfaceView;
     private boolean surfaceReady = false;
-    private boolean nativeStarted = false;
-    private int nativeSurfaceWidth = 0;
-    private int nativeSurfaceHeight = 0;
+    private volatile boolean nativeStarted = false;
+    private volatile int nativeSurfaceWidth = 0;
+    private volatile int nativeSurfaceHeight = 0;
+    // Native start/stop (which pthread_join() the render/event threads) must never
+    // run on the UI thread: if the render thread is blocked in a producer call the
+    // join would stall the main thread past the InputDispatcher's 5s ANR budget and
+    // drop the touch channel. So lifecycle transitions are executed on this single
+    // worker and coalesced to the latest requested surface (IME resize events during
+    // typing arrive in bursts). "TOUCHPAD-FREEZE" fix.
+    private final ExecutorService nativeTransitionWorker =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "anland-native-transition");
+                t.setDaemon(true);
+                return t;
+            });
+    private final Object nativeTransitionLock = new Object();
+    private Surface pendingNativeSurface;   // null => stop-only
+    private boolean nativeTransitionScheduled;
     // System-clipboard bridge; also the target for the native clipboard callbacks.
     private Clipboard clipboard;
     private static final String PREFS_NAME = "anland_settings";
     private int customScreenWidth = 0;
     private int customScreenHeight = 0;
-    private int viewWidth = 0;
-    private int viewHeight = 0;
+    private volatile int viewWidth = 0;
+    private volatile int viewHeight = 0;
     private static final String KEY_BOUND_KEYCODE = "bound_keycode";
     private static final String KEY_SOCKET_PATH = "socket_path";
     private static final String KEY_USE_ROOT = "use_root";
@@ -341,6 +358,9 @@ public class MainActivity extends Activity
     // Start (or restart) this window's native pipeline, but only if the daemon
     // socket is still a live socket. The daemon can go down after launch, so
     // re-check on every (re)connect; if it is gone, report it and exit the window.
+    // The actual native start is deferred to the transition worker to keep the
+    // blocking pthread_join off the UI thread; we only do the (main-thread-only)
+    // socket check and finish() here.
     private void startNative(android.view.Surface surface) {
         if (!isSocketFile(resolveSocketPath())) {
             android.widget.Toast.makeText(this, "Deamon Down",
@@ -348,19 +368,70 @@ public class MainActivity extends Activity
             finish();
             return;
         }
-        mNative.start(surface, clipboard, this);
-        nativeStarted = true;
-        nativeSurfaceWidth = viewWidth;
-        nativeSurfaceHeight = viewHeight;
+        scheduleNativeTransition(surface);
     }
 
+    // Request a stop-only native lifecycle transition on the worker thread.
     private void stopNative() {
-        if (!nativeStarted)
-            return;
-        mNative.stop();
-        nativeStarted = false;
-        nativeSurfaceWidth = 0;
-        nativeSurfaceHeight = 0;
+        scheduleNativeTransition(null);
+    }
+
+    // Post the latest desired lifecycle -- start with `surface`, or stop if null --
+    // to the single worker. Concurrent requests coalesce onto the latest surface, so
+    // a burst of IME resizes results in at most one stop+start instead of many.
+    private void scheduleNativeTransition(Surface surface) {
+        synchronized (nativeTransitionLock) {
+            pendingNativeSurface = surface;
+            if (nativeTransitionScheduled)
+                return;
+            nativeTransitionScheduled = true;
+        }
+        nativeTransitionWorker.execute(this::runNativeTransition);
+    }
+
+    // Runs on nativeTransitionWorker. Loop while the request changed underneath us.
+    private void runNativeTransition() {
+        Surface surface;
+        synchronized (nativeTransitionLock) {
+            surface = pendingNativeSurface;
+            pendingNativeSurface = null;
+            nativeTransitionScheduled = false;
+        }
+        if (surface == null) {
+            if (nativeStarted) {
+                mNative.stop();
+                nativeStarted = false;
+                nativeSurfaceWidth = 0;
+                nativeSurfaceHeight = 0;
+            }
+        } else {
+            if (nativeStarted) {
+                mNative.stop();
+                nativeStarted = false;
+            }
+            mNative.start(surface, clipboard, this);
+            nativeStarted = true;
+            nativeSurfaceWidth = viewWidth;
+            nativeSurfaceHeight = viewHeight;
+        }
+        // If a newer request arrived while we were running, process it immediately
+        // rather than leaving a stale transition queued.
+        synchronized (nativeTransitionLock) {
+            if (pendingNativeSurface == null)
+                return;
+        }
+        nativeTransitionWorker.execute(this::runNativeTransition);
+    }
+
+    // Block until any queued/running native transition has finished. Called on the
+    // main thread only when tearing down (onDestroy), where we are about to free the
+    // native handle and must not let a pending transition touch a destroyed mNative.
+    private void awaitNativeTransitions() {
+        try {
+            nativeTransitionWorker.submit(() -> {}).get();
+        } catch (Exception e) {
+            Log.w(TAG, "awaitNativeTransitions interrupted", e);
+        }
     }
 
     // True only when `path` exists and is a unix-domain socket. In root mode the
@@ -1571,6 +1642,9 @@ public class MainActivity extends Activity
         // every window, so it is intentionally not torn down here -- destroying it
         // would cut the camera for the other open windows.
         if (mNative != null) {
+            // Drain any in-flight native transition before releasing the handle:
+            // scheduleNativeTransition may already have posted a stop/start that uses mNative.
+            awaitNativeTransitions();
             mNative.destroy();
             mNative = null;
         }
