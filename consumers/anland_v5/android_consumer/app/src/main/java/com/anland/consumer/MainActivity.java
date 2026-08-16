@@ -592,8 +592,10 @@ public class MainActivity extends Activity
         // count / height) comes from the user's JSON config; see buildExtraKeysBar.
         mRoot = root;
         mDensity = getResources().getDisplayMetrics().density;
-        mKeyboardFloating = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getBoolean(KEY_KEYBOARD_FLOATING, false);
+        // Always-on keyboard floating: the IME overlays the full-size surface
+        // instead of shrinking it, so opening the keyboard never triggers a
+        // native layout/resize/restart of the surface (which froze the pointer).
+        mKeyboardFloating = true;
         buildExtraKeysBar();
 
         // ADDED: Create VirtualKeyboardView (hidden initially)
@@ -1570,8 +1572,7 @@ public class MainActivity extends Activity
 
         // Pick up a Keyboard-floating toggle made in Settings: update the bar's
         // backdrop and re-run the layout so the surface margin tracks the new mode.
-        mKeyboardFloating = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getBoolean(KEY_KEYBOARD_FLOATING, false);
+        mKeyboardFloating = true; // always floating (see comment at onCreate)
         if (extraKeysBar != null)
             extraKeysBar.setFloating(mKeyboardFloating);
         relayout();
