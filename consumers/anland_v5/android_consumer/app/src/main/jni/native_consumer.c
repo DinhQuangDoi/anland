@@ -634,8 +634,9 @@ static void *render_thread_func(void *arg)
             continue;
         }
 
-        if (select_dmabuf(s->ctx, idx) < 0) {
-            api.queueBuffer(s->window, anb, -1);
+        int selected = select_dmabuf(s->ctx, idx);
+        if (selected <= 0) {
+            api.cancelBuffer(s->window, anb, -1);
             usleep(16000);
             continue;
         }

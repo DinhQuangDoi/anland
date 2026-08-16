@@ -391,7 +391,8 @@ int push_dmabufs(display_ctx *ctx, const int *fds, const struct buf_info *infos,
         return 0;
 
     int ret = push_dmabufs_internal(ctx);
-    enter_fallback(ctx);
+    if (ret < 0)
+        enter_fallback(ctx);
     return ret;
 }
 
@@ -408,9 +409,12 @@ int select_dmabuf(display_ctx *ctx, int idx)
 
     *ctx->shm_ptr = (uint32_t)idx;
     eventfd_t val = 1;
-    eventfd_write(ctx->buf_ready_efd, val);
+    if (eventfd_write(ctx->buf_ready_efd, val) < 0) {
+        enter_fallback(ctx);
+        return -1;
+    }
     ctx->buffer_pending = true;
-    return 0;
+    return 1;
 }
 
 /* Wait for the producer to finish the frame, then return its render-done fence so
