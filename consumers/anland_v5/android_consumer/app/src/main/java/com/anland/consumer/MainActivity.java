@@ -377,8 +377,10 @@ public class MainActivity extends Activity
     }
 
     // Post the latest desired lifecycle -- start with `surface`, or stop if null --
-    // to the single worker. Concurrent requests coalesce onto the latest surface, so
-    // a burst of IME resizes results in at most one stop+start instead of many.
+    // to the single worker. This is the ONLY place that enqueues a runnable, so at
+    // most one transition task can ever be queued/running: a transition still in
+    // flight updates pendingNativeSurface in place, and the draining worker re-reads
+    // it on its next pass. A burst of IME resizes thus collapses to one stop+start.
     private void scheduleNativeTransition(Surface surface) {
         synchronized (nativeTransitionLock) {
             pendingNativeSurface = surface;
@@ -389,7 +391,9 @@ public class MainActivity extends Activity
         nativeTransitionWorker.execute(this::runNativeTransition);
     }
 
-    // Runs on nativeTransitionWorker. Loop while the request changed underneath us.
+    // Runs on nativeTransitionWorker. Drains the latest request; if a newer one
+    // arrived while this ran, scheduleNativeTransition will have queued a follow-up
+    // (the executor is single-threaded, so tasks serialize and never overlap).
     private void runNativeTransition() {
         Surface surface;
         synchronized (nativeTransitionLock) {
@@ -414,13 +418,6 @@ public class MainActivity extends Activity
             nativeSurfaceWidth = viewWidth;
             nativeSurfaceHeight = viewHeight;
         }
-        // If a newer request arrived while we were running, process it immediately
-        // rather than leaving a stale transition queued.
-        synchronized (nativeTransitionLock) {
-            if (pendingNativeSurface == null)
-                return;
-        }
-        nativeTransitionWorker.execute(this::runNativeTransition);
     }
 
     // Block until any queued/running native transition has finished. Called on the
