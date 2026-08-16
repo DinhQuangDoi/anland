@@ -442,13 +442,17 @@ impl Anland {
                 };
                 let len = unsafe { u.text_input.size } as usize;
                 if len > 0 {
+                    // Nonblock drain: the producer sends the text payload together
+                    // with the header in one send_all, so it is already in the
+                    // socket. Don't fall through to special-event handling if the
+                    // drain fails, or the leftover payload desyncs the stream.
                     let mut buf = vec![0u8; len];
-                    if self.ctx.poll_input_event_extend_data(&mut buf, 1000) {
+                    if self.ctx.poll_input_event_extend_data(&mut buf, 0) {
                         debug!("text input: {} bytes", len);
                         out.extend(self.text_to_key_events(&buf));
-                        continue;
                     }
                 }
+                continue;
             }
             if self.handle_special_event(&event) {
                 continue;
