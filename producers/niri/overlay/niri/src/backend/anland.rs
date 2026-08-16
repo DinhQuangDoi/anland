@@ -314,6 +314,13 @@ impl Anland {
             return;
         }
 
+        // The previous session's frame index is meaningless for these freshly
+        // imported buffers. Reset it so damage tracking does a full repaint
+        // (age 0) instead of claiming age 1 on a brand-new buffer whose content
+        // is uninitialized -- that produced blank (black) frames that only
+        // cleared on the next exit/enter, alternating on every reconnect.
+        self.last_buffer_idx = -1;
+
         self.dmabufs.clear();
 
         for i in 0..count {
@@ -410,6 +417,7 @@ impl Anland {
                     std::mem::size_of::<u64>(),
                 );
             }
+            debug!("buffer_ready event fired (val={})", val);
             if let Some(output) = anland.output.clone() {
                 state.niri.queue_redraw(&output);
             }
@@ -793,11 +801,13 @@ impl Anland {
         let _span = tracy_client::span!("Anland::render");
 
         if self.ctx.is_fallback() {
+            debug!("render: skipped (in fallback)");
             return RenderResult::Skipped;
         }
 
         let idx = self.ctx.selected_buffer_index();
         if idx < 0 || idx as usize >= self.dmabufs.len() {
+            debug!("render: skipped selected={} dmabufs={}", idx, self.dmabufs.len());
             return RenderResult::Skipped;
         }
 
