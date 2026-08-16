@@ -430,6 +430,26 @@ impl Anland {
             let Some(event) = self.ctx.poll_input_event(timeout) else {
                 break;
             };
+            if event.type_ == INPUT_TYPE_TEXT_INPUT {
+                let u = unsafe {
+                    let mut u: InputEventUnion = std::mem::zeroed();
+                    std::ptr::copy_nonoverlapping(
+                        &event.touch as *const InputTouch as *const u8,
+                        &mut u as *mut InputEventUnion as *mut u8,
+                        std::mem::size_of::<InputEventUnion>(),
+                    );
+                    u
+                };
+                let len = unsafe { u.text_input.size } as usize;
+                if len > 0 {
+                    let mut buf = vec![0u8; len];
+                    if self.ctx.poll_input_event_extend_data(&mut buf, 1000) {
+                        debug!("text input: {} bytes", len);
+                        out.extend(self.text_to_key_events(&buf));
+                        continue;
+                    }
+                }
+            }
             if self.handle_special_event(&event) {
                 continue;
             }
@@ -475,6 +495,136 @@ impl Anland {
             }
             _ => false,
         }
+    }
+
+    /// Turn a run of UTF-8 text into synthesized key press/release events.
+    ///
+    /// IME text arrives as an arbitrary unicode payload with no keyboard layout,
+    /// but Wayland clients only receive keycodes that they resolve through the
+    /// keymap sent by the compositor. For text that lives in the active layout
+    /// (Latin/ASCII) we find the evdev keycode + Shift needed to reproduce each
+    /// codepoint and emit a press+release pair. Since the compositor and the
+    /// focused client resolve against the same keymap, the character is typed in
+    /// any client regardless of which one is focused. Codepoints not present in
+    /// a keyboard (e.g. emoji) are dropped.
+    fn text_to_key_events(&self, text: &[u8]) -> Vec<SmithayInputEvent<AnlandInput>> {
+        const KEYCODE_LEFT_SHIFT: u32 = 42;
+        const KEYCODE_SPACE: u32 = 57;
+        const KEYCODE_ENTER: u32 = 28;
+        const KEYCODE_TAB: u32 = 15;
+        const KEYCODE_BACKSPACE: u32 = 14;
+        const KEYCODE_ESCAPE: u32 = 1;
+
+        // Map an ASCII byte to (keycode, needs_shift). Letters, digits and the
+        // typical symbol set follow the standard evdev keymap; anything unknown
+        // returns None and is skipped.
+        fn char_key(c: u8) -> Option<(u32, bool)> {
+            if c == b' ' {
+                return Some((KEYCODE_SPACE, false));
+            }
+            if c.is_ascii_digit() {
+                let keycode = match c {
+                    b'1' => 2, b'2' => 3, b'3' => 4, b'4' => 5, b'5' => 6,
+                    b'6' => 7, b'7' => 8, b'8' => 9, b'9' => 10, _ => 11,
+                };
+                return Some((keycode, false));
+            }
+            // Letters are stable evdev keycodes; upper-case just needs Shift.
+            if c.is_ascii_alphabetic() {
+                let code = match c.to_ascii_lowercase() {
+                    b'a' => 30, b'b' => 48, b'c' => 46, b'd' => 32, b'e' => 18,
+                    b'f' => 33, b'g' => 34, b'h' => 35, b'i' => 23, b'j' => 36,
+                    b'k' => 37, b'l' => 38, b'm' => 50, b'n' => 49, b'o' => 24,
+                    b'p' => 25, b'q' => 16, b'r' => 19, b's' => 31, b't' => 20,
+                    b'u' => 22, b'v' => 47, b'w' => 17, b'x' => 45, b'y' => 21,
+                    b'z' => 44,
+                    _ => unreachable!(),
+                };
+                return Some((code, c.is_ascii_uppercase()));
+            }
+            // Digit-row shifts: 1->!, 2->@, ... 0->). Keycode is the digit's.
+            const DIGIT_SHIFTS: &[(u8, u32)] = &[
+                (b'!', 2), (b'@', 3), (b'#', 4), (b'$', 5), (b'%', 6),
+                (b'^', 7), (b'&', 8), (b'*', 9), (b'(', 10), (b')', 11),
+            ];
+            if let Some(&(_, keycode)) = DIGIT_SHIFTS.iter().find(|&&(ch, _)| ch == c) {
+                return Some((keycode, true));
+            }
+            // Punctuation pairs (normal, shifted) on shared keys.
+            match c {
+                b'-' => Some((12, false)),  b'_' => Some((12, true)),
+                b'=' => Some((13, false)),  b'+' => Some((13, true)),
+                b'[' => Some((26, false)),  b'{' => Some((26, true)),
+                b']' => Some((27, false)),  b'}' => Some((27, true)),
+                b'\\' => Some((43, false)), b'|' => Some((43, true)),
+                b';' => Some((39, false)),  b':' => Some((39, true)),
+                b'\'' => Some((40, false)), b'"' => Some((40, true)),
+                b'`' => Some((41, false)),  b'~' => Some((41, true)),
+                b',' => Some((51, false)),  b'<' => Some((51, true)),
+                b'.' => Some((52, false)),  b'>' => Some((52, true)),
+                b'/' => Some((53, false)),  b'?' => Some((53, true)),
+                b'\n' => Some((KEYCODE_ENTER, false)),
+                b'\t' => Some((KEYCODE_TAB, false)),
+                b'\x08' => Some((KEYCODE_BACKSPACE, false)),
+                b'\x1b' => Some((KEYCODE_ESCAPE, false)),
+                _ => None,
+            }
+        }
+
+        let mut events = Vec::new();
+        let time = get_monotonic_time().as_micros() as u64;
+        let mut shift_down = false;
+
+        for &c in text {
+            let Some((keycode, needs_shift)) = char_key(c) else {
+                continue;
+            };
+            if needs_shift && !shift_down {
+                events.push(SmithayInputEvent::Keyboard {
+                    event: AnlandKeyboardEvent {
+                        time,
+                        key_code: KEYCODE_LEFT_SHIFT,
+                        state: KeyState::Pressed,
+                    },
+                });
+                shift_down = true;
+            } else if !needs_shift && shift_down {
+                events.push(SmithayInputEvent::Keyboard {
+                    event: AnlandKeyboardEvent {
+                        time,
+                        key_code: KEYCODE_LEFT_SHIFT,
+                        state: KeyState::Released,
+                    },
+                });
+                shift_down = false;
+            }
+            events.push(SmithayInputEvent::Keyboard {
+                event: AnlandKeyboardEvent {
+                    time,
+                    key_code: keycode,
+                    state: KeyState::Pressed,
+                },
+            });
+            events.push(SmithayInputEvent::Keyboard {
+                event: AnlandKeyboardEvent {
+                    time,
+                    key_code: keycode,
+                    state: KeyState::Released,
+                },
+            });
+        }
+
+        if shift_down {
+            events.push(SmithayInputEvent::Keyboard {
+                event: AnlandKeyboardEvent {
+                    time,
+                    key_code: KEYCODE_LEFT_SHIFT,
+                    state: KeyState::Released,
+                },
+            });
+        }
+
+        events
     }
 
     /// Translate a raw Anland input event into a smithay input event niri can
