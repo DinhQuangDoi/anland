@@ -980,6 +980,7 @@ Java_com_anland_consumer_Native_nativePause(
     if (!s)
         return;
 
+    LOGI("nativePause");
     pthread_mutex_lock(&s->lock);
     s->surface_valid = false;
     pthread_mutex_unlock(&s->lock);
@@ -1005,6 +1006,7 @@ Java_com_anland_consumer_Native_nativeResume(
     if (!s)
         return;
 
+    LOGI("nativeResume");
     pthread_mutex_lock(&s->lock);
 
     if (s->window) {
