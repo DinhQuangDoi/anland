@@ -91,9 +91,15 @@ static void try_deliver_fds(daemon_ctx *ctx)
     if (ctx->consumer)
         send_ctrl(ctx->consumer->ctrl_fd, CTRL_MSG_FDS_READY);
 
-    for (int i = 0; i < ctx->deposited_fd_count; i++)
-        close(ctx->deposited_fds[i]);
-    ctx->deposited_fd_count = 0;
+    /* Keep the deposited fds cached instead of releasing them here. A fast
+     * home->in toggle can re-send PICKUP_FDS before the consumer has a chance to
+     * re-deposit, and delivering-then-clearing makes the producer spin forever on
+     * EAGAIN (fallback black screen). Retain the set so any later PICKUP succeeds
+     * immediately -- the same fds stay valid because the consumer holds the real
+     * backing resources (the daemon only owns SCM_RIGHTS copies). The deposit is
+     * dropped naturally when a new consumer connects (handle_new_connection /
+     * handle_client_data CONSUMER_HELLO) or the current consumer disconnects
+     * (drop_client). Sending a shared fd again just dupes it into the producer. */
     ctx->producer_waiting_fds = false;
 
     fprintf(stderr, "daemon: fds delivered to producer\n");
