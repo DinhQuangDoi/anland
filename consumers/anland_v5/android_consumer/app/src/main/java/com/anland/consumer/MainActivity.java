@@ -46,6 +46,9 @@ public class MainActivity extends Activity
 
     private SurfaceView surfaceView;
     private boolean surfaceReady = false;
+    private boolean nativeStarted = false;
+    private int nativeSurfaceWidth = 0;
+    private int nativeSurfaceHeight = 0;
     // System-clipboard bridge; also the target for the native clipboard callbacks.
     private Clipboard clipboard;
     private static final String PREFS_NAME = "anland_settings";
@@ -346,6 +349,18 @@ public class MainActivity extends Activity
             return;
         }
         mNative.start(surface, clipboard, this);
+        nativeStarted = true;
+        nativeSurfaceWidth = viewWidth;
+        nativeSurfaceHeight = viewHeight;
+    }
+
+    private void stopNative() {
+        if (!nativeStarted)
+            return;
+        mNative.stop();
+        nativeStarted = false;
+        nativeSurfaceWidth = 0;
+        nativeSurfaceHeight = 0;
     }
 
     // True only when `path` exists and is a unix-domain socket. In root mode the
@@ -1495,8 +1510,7 @@ public class MainActivity extends Activity
         // and registers SERVICE_TYPE_CAMERA on the very first connect rather than a
         // later reconnect. Idempotent, so safe to call on every resume.
         applyCameraState();
-        if (surfaceReady) {
-            mNative.stop();
+        if (surfaceReady && !nativeStarted) {
             applyConnectionConfig();
             startNative(surfaceView.getHolder().getSurface());
             pushRefreshRate();
@@ -1538,7 +1552,6 @@ public class MainActivity extends Activity
         DisplayManager dm = getSystemService(DisplayManager.class);
         if (dm != null)
             dm.unregisterDisplayListener(displayListener);
-        mNative.stop();
         abandonMediaAudioFocus();
     }
 
@@ -1661,13 +1674,17 @@ public class MainActivity extends Activity
         surfaceReady = true;
         // Same ordering guarantee as onResume: camera service settled before connect.
         applyCameraState();
-        mNative.stop();
-        applyConnectionConfig();
-        startNative(holder.getSurface());
-        pushRefreshRate();
-        applyMicState();
-        applyAudioLatency();
-        applyAudioKeepalive();
+        if (nativeStarted && width == nativeSurfaceWidth && height == nativeSurfaceHeight) {
+            pushRefreshRate();
+        } else {
+            stopNative();
+            applyConnectionConfig();
+            startNative(holder.getSurface());
+            pushRefreshRate();
+            applyMicState();
+            applyAudioLatency();
+            applyAudioKeepalive();
+        }
 
         // ===== 更新屏幕尺寸并重置平滑状态 =====
         updateTouchpadBounds(null);
@@ -1680,7 +1697,7 @@ public class MainActivity extends Activity
         surfaceReady = false;
         if (immersive != null) immersive.stop();
         releasePointerCapture(false);
-        mNative.stop();
+        stopNative();
     }
 
 

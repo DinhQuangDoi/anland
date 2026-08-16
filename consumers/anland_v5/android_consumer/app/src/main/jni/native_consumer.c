@@ -161,8 +161,19 @@ static int collect_dmabufs(struct consumer_state *s)
         s->dmabuf_infos[found].format = PIXEL_FORMAT_RGBA_8888;
         s->dmabuf_infos[found].modifier = 0;
         s->dmabuf_infos[found].offset = 0;
-        LOGI("  buf[%d]: anb=%p fd=%d dup=%d %dx%d stride=%d",
-             found, (void *)anb, fd, dup_fd, width, height, stride);
+        const native_handle_t *handle = anb->handle;
+        int int_count = handle->numInts;
+        const int *ints = &handle->data[handle->numFds];
+        LOGI("  buf[%d]: anb=%p fd=%d dup=%d %dx%d stride=%d format=%d usage=0x%llx fds=%d ints=%d",
+             found, (void *)anb, fd, dup_fd, width, height, stride,
+             anb->format, (unsigned long long)anb->usage,
+             handle->numFds, handle->numInts);
+        LOGI("  buf[%d]: handle ints[0..3]=%d,%d,%d,%d",
+             found,
+             int_count > 0 ? ints[0] : 0,
+             int_count > 1 ? ints[1] : 0,
+             int_count > 2 ? ints[2] : 0,
+             int_count > 3 ? ints[3] : 0);
         found++;
     }
 
