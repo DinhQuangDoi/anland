@@ -34,6 +34,8 @@
 
     <!-- Bind key -->
     <string name="bind_key_button">Bind Soft Keyboard Toggle Key</string>
+    <string name="raise_desktop_for_soft_keyboard">Raise desktop when soft keyboard opens</string>
+    <string name="raise_desktop_for_soft_keyboard_hint">When on, the desktop shrinks and moves up so you can see what you type.</string>
     <string name="listening_countdown">Listening… (%1$ds)</string>
     <string name="status_current_none">Current: None</string>
     <string name="status_current">Current: %1$s</string>
@@ -67,9 +69,6 @@
     </string-array>
     <string name="back_opens_switch">Back key quickly toggles extra keys bar</string>
     <string name="back_opens_hint">When ON, pressing Back while the extra keys bar is hidden shows it; pressing Back again hides it.</string>
-    <string name="keyboard_floating_switch">Keyboard floating (overlay display)</string>
-    <string name="keyboard_floating_hint">When ON, the soft keyboard and the extra keys bar float over the display area instead of shrinking it; the bar uses a translucent background and rises with the keyboard, but the display is not resized. When OFF, the original behaviour (display shrinks to make room) is kept. Takes effect on next return to the desktop.</string>
-
     <!-- Custom layout editor -->
     <string name="btn_load_default">Load default template</string>
     <string name="btn_load_file">Load from file…</string>
@@ -98,6 +97,8 @@
     <string name="gesture_scale_label">Gesture magnitude</string>
     <string name="gesture_scale_value">%1$.0f px</string>
     <string name="gesture_scale_hint">Gestures forwarded as touch (pinch, three or more fingers) are mapped into a square of this size centred on the pointer. Larger values make the same finger movement travel further.</string>
+    <string name="disable_multi_finger_switch">Disable pinch and multi-finger gestures</string>
+    <string name="disable_multi_finger_hint">ON: two-finger pinch/zoom and three-or-more-finger gestures are swallowed and never reach the desktop; two-finger scrolling and two-finger right-click still work. OFF: pinch and multi-finger gestures are forwarded to the desktop as touch.</string>
 
     <!-- Connection -->
     <string name="socket_path_label">Daemon socket path</string>
