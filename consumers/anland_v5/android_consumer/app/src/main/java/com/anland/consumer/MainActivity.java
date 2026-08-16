@@ -377,6 +377,25 @@ public class MainActivity extends Activity
         scheduleNativeTransition(null);
     }
 
+    // Pause the native consumer without disconnecting from the daemon. Called from
+    // surfaceDestroyed so the render thread sleeps while the Activity is in background.
+    private void pauseNative() {
+        nativeTransitionWorker.execute(() -> {
+            if (nativeStarted) {
+                mNative.pause();
+            }
+        });
+    }
+
+    // Resume the native consumer with a new surface after surfaceCreated.
+    private void resumeNative(Surface surface) {
+        nativeTransitionWorker.execute(() -> {
+            if (nativeStarted) {
+                mNative.resume(surface);
+            }
+        });
+    }
+
     // Post the latest desired lifecycle -- start with `surface`, or stop if null --
     // to the single worker. This is the ONLY place that enqueues a runnable, so at
     // most one transition task can ever be queued/running: a transition still in
@@ -1753,6 +1772,9 @@ public class MainActivity extends Activity
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
+        if (nativeStarted) {
+            resumeNative(holder.getSurface());
+        }
     }
 
     @Override
@@ -1765,12 +1787,20 @@ public class MainActivity extends Activity
         surfaceReady = true;
         // Same ordering guarantee as onResume: camera service settled before connect.
         applyCameraState();
-        if (nativeStarted && width == nativeSurfaceWidth && height == nativeSurfaceHeight) {
+        if (!nativeStarted) {
+            startNative(holder.getSurface());
+            pushRefreshRate();
+            applyMicState();
+            applyAudioLatency();
+            applyAudioKeepalive();
+        } else if (width == nativeSurfaceWidth && height == nativeSurfaceHeight) {
             pushRefreshRate();
         } else {
-            stopNative();
+            pauseNative();
             applyConnectionConfig();
-            startNative(holder.getSurface());
+            resumeNative(holder.getSurface());
+            nativeSurfaceWidth = viewWidth;
+            nativeSurfaceHeight = viewHeight;
             pushRefreshRate();
             applyMicState();
             applyAudioLatency();
@@ -1788,7 +1818,7 @@ public class MainActivity extends Activity
         surfaceReady = false;
         if (immersive != null) immersive.stop();
         releasePointerCapture(false);
-        stopNative();
+        pauseNative();
     }
 
 

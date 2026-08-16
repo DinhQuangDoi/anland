@@ -49,9 +49,15 @@ struct consumer_state {
     pthread_t render_thread;
     volatile bool running;
 
-    //Note: it is Deamon's Reconnect, not Fallback Flag
+    //Note: Deamon's Reconnect, not Fallback Flag
     //Fallback is maintained by display lib, and the consumer should not care about it.
     volatile bool need_reconnect;
+
+    /* surface_valid is true while we hold a live ANativeWindow. When the user
+     * presses home, surfaceDestroyed sets this to false so the render thread
+     * sleeps without disconnecting from the daemon. surfaceCreated sets it back
+     * to true and recreates the buffers. */
+    volatile bool surface_valid;
 
     int buf_count;
     int dmabuf_fds[MAX_COLLECT_BUFS];
@@ -420,31 +426,8 @@ static int recv_fd_via_root_helper(const char *daemon_sock,
     return fd;
 }
 
-static int do_connect(struct consumer_state *s)
+static int setup_window_and_buffers(struct consumer_state *s, ANativeWindow *win)
 {
-    /* Snapshot the connection config for this attempt. */
-    pthread_mutex_lock(&s->cfg_lock);
-    bool use_root = s->cfg_use_root;
-    char sock_path[sizeof(s->cfg_socket_path)];
-    char helper_path[sizeof(s->cfg_helper_path)];
-    char bridge_path[sizeof(s->cfg_bridge_path)];
-    memcpy(sock_path, s->cfg_socket_path, sizeof(sock_path));
-    memcpy(helper_path, s->cfg_helper_path, sizeof(helper_path));
-    memcpy(bridge_path, s->cfg_bridge_path, sizeof(bridge_path));
-    pthread_mutex_unlock(&s->cfg_lock);
-
-    const char *sock = sock_path;
-
-    if (s->ctx) {
-        audio_set_ctx(s->audio, NULL);   /* detach audio before the old ctx (and its fd) dies */
-        stop_event_thread(s);
-        join_event_thread(s);
-        disconnect(s->ctx);
-        s->ctx = NULL;
-    }
-    cleanup_dmabufs(s);
-
-    ANativeWindow *win = s->window;
     pthread_mutex_lock(&s->cfg_lock);
     int cw = s->cfg_custom_width;
     int ch = s->cfg_custom_height;
@@ -481,6 +464,30 @@ static int do_connect(struct consumer_state *s)
     if (collect_dmabufs(s) < 0)
         return -1;
 
+    return 0;
+}
+
+static void publish_buffers(struct consumer_state *s)
+{
+    set_screen_info(s->ctx, s->screen_w, s->screen_h,
+                    PIXEL_FORMAT_RGBA_8888, s->refresh_mhz);
+    push_dmabufs(s->ctx, s->dmabuf_fds, s->dmabuf_infos, s->buf_count);
+}
+
+static int connect_display_ctx(struct consumer_state *s)
+{
+    pthread_mutex_lock(&s->cfg_lock);
+    bool use_root = s->cfg_use_root;
+    char sock_path[sizeof(s->cfg_socket_path)];
+    char helper_path[sizeof(s->cfg_helper_path)];
+    char bridge_path[sizeof(s->cfg_bridge_path)];
+    memcpy(sock_path, s->cfg_socket_path, sizeof(sock_path));
+    memcpy(helper_path, s->cfg_helper_path, sizeof(helper_path));
+    memcpy(bridge_path, s->cfg_bridge_path, sizeof(bridge_path));
+    pthread_mutex_unlock(&s->cfg_lock);
+
+    const char *sock = sock_path;
+
     LOGI("connecting to %s (%dx%d, %d bufs, root=%d)", sock,
          s->screen_w, s->screen_h, s->buf_count, use_root);
 
@@ -499,9 +506,7 @@ static int do_connect(struct consumer_state *s)
         return -1;
     }
 
-    set_screen_info(s->ctx, s->screen_w, s->screen_h,
-                    PIXEL_FORMAT_RGBA_8888, s->refresh_mhz);
-    push_dmabufs(s->ctx, s->dmabuf_fds, s->dmabuf_infos, s->buf_count);
+    publish_buffers(s);
 
     /* Register the camera service only when it was initialised (i.e. the user
      * enabled it in settings and granted CAMERA). The service_info lives in this
@@ -520,6 +525,26 @@ static int do_connect(struct consumer_state *s)
     set_exit_fallback_callback(s->ctx, on_exit_fallback, s);
 
     audio_set_ctx(s->audio, s->ctx);   /* audio fd is now live; threads pick it up via get_audio_fd */
+
+    return 0;
+}
+
+static int do_connect(struct consumer_state *s)
+{
+    if (s->ctx) {
+        audio_set_ctx(s->audio, NULL);   /* detach audio before the old ctx (and its fd) dies */
+        stop_event_thread(s);
+        join_event_thread(s);
+        disconnect(s->ctx);
+        s->ctx = NULL;
+    }
+    cleanup_dmabufs(s);
+
+    if (setup_window_and_buffers(s, s->window) < 0)
+        return -1;
+
+    if (connect_display_ctx(s) < 0)
+        return -1;
 
     s->need_reconnect = false;
     LOGI("connected");
@@ -608,9 +633,18 @@ static void *render_thread_func(void *arg)
     LOGI("render thread started");
 
     while (s->running) {
+        pthread_mutex_lock(&s->lock);
+
+        if (!s->surface_valid) {
+            pthread_mutex_unlock(&s->lock);
+            usleep(16000);
+            continue;
+        }
+
         if (s->need_reconnect) {
             LOGI("reconnecting...");
             if (do_connect(s) < 0) {
+                pthread_mutex_unlock(&s->lock);
                 usleep(500000);
                 continue;
             }
@@ -619,6 +653,7 @@ static void *render_thread_func(void *arg)
         ANativeWindowBuffer *anb = NULL;
         int acqfence = -1;
         if (api.dequeueBuffer(s->window, &anb, &acqfence) != 0 || !anb) {
+            pthread_mutex_unlock(&s->lock);
             usleep(16000);
             continue;
         }
@@ -641,6 +676,7 @@ static void *render_thread_func(void *arg)
 
         if (idx < 0) {
             api.queueBuffer(s->window, anb, -1);
+            pthread_mutex_unlock(&s->lock);
             usleep(16000);
             continue;
         }
@@ -648,6 +684,7 @@ static void *render_thread_func(void *arg)
         int selected = select_dmabuf(s->ctx, idx);
         if (selected <= 0) {
             api.cancelBuffer(s->window, anb, -1);
+            pthread_mutex_unlock(&s->lock);
             usleep(16000);
             continue;
         }
@@ -658,6 +695,7 @@ static void *render_thread_func(void *arg)
          * completes (no glFinish stall). rfence == -1 falls back to "ready now". */
         int rfence = refresh_done(s->ctx);
         api.queueBuffer(s->window, anb, rfence);
+        pthread_mutex_unlock(&s->lock);
     }
 
     LOGI("render thread stopped");
@@ -867,6 +905,7 @@ Java_com_anland_consumer_Native_nativeStart(
 
     s->running = true;
     s->need_reconnect = true;
+    s->surface_valid = true;
     pthread_create(&s->render_thread, NULL, render_thread_func, s);
 
     /* Audio streams live independently of the connection; the render thread attaches
@@ -888,6 +927,7 @@ Java_com_anland_consumer_Native_nativeStop(
 
     if (s->running) {
         s->running = false;
+        s->surface_valid = false;
         pthread_mutex_unlock(&s->lock);
         pthread_join(s->render_thread, NULL);
         pthread_mutex_lock(&s->lock);
@@ -929,6 +969,75 @@ Java_com_anland_consumer_Native_nativeStop(
         s->window = NULL;
     }
 
+    pthread_mutex_unlock(&s->lock);
+}
+
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_Native_nativePause(
+    JNIEnv *env, jclass clazz, jlong handle)
+{
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+
+    pthread_mutex_lock(&s->lock);
+    s->surface_valid = false;
+    pthread_mutex_unlock(&s->lock);
+
+    /* render_thread_func checks surface_valid under s->lock and sleeps when it
+     * is false, so once we acquire the lock below the render thread cannot be
+     * touching the window or buffers any more. */
+
+    pthread_mutex_lock(&s->lock);
+    cleanup_dmabufs(s);
+    if (s->window) {
+        ANativeWindow_release(s->window);
+        s->window = NULL;
+    }
+    pthread_mutex_unlock(&s->lock);
+}
+
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_Native_nativeResume(
+    JNIEnv *env, jclass clazz, jlong handle, jobject surface)
+{
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+
+    pthread_mutex_lock(&s->lock);
+
+    if (s->window) {
+        ANativeWindow_release(s->window);
+        s->window = NULL;
+    }
+
+    s->window = ANativeWindow_fromSurface(env, surface);
+    if (!s->window) {
+        LOGE("nativeResume: ANativeWindow_fromSurface failed");
+        pthread_mutex_unlock(&s->lock);
+        return;
+    }
+
+    if (setup_window_and_buffers(s, s->window) < 0) {
+        ANativeWindow_release(s->window);
+        s->window = NULL;
+        pthread_mutex_unlock(&s->lock);
+        return;
+    }
+
+    if (!s->ctx) {
+        if (connect_display_ctx(s) < 0) {
+            ANativeWindow_release(s->window);
+            s->window = NULL;
+            pthread_mutex_unlock(&s->lock);
+            return;
+        }
+    } else {
+        publish_buffers(s);
+    }
+
+    s->surface_valid = true;
     pthread_mutex_unlock(&s->lock);
 }
 

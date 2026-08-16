@@ -37,12 +37,7 @@ struct display_ctx {
     void  *fallback_userdata;
 };
 
-/*
- * Release every consumer-side resource (dmabuf fds, the four picked-up fds and the
- * shm mapping), leaving the context holding only the daemon ctrl_fd. Does NOT touch
- * the fallback flag or fire the fallback callback — callers decide that. Idempotent.
- */
-static void release_consumer_resources(display_ctx *ctx)
+static void release_dmabufs(display_ctx *ctx)
 {
     for (int i = 0; i < ctx->buf_count; i++) {
         if (ctx->dmabuf_fds[i] >= 0) {
@@ -51,6 +46,16 @@ static void release_consumer_resources(display_ctx *ctx)
         }
     }
     ctx->buf_count = 0;
+}
+
+/*
+ * Release every consumer-side resource (dmabuf fds, the four picked-up fds and the
+ * shm mapping), leaving the context holding only the daemon ctrl_fd. Does NOT touch
+ * the fallback flag or fire the fallback callback — callers decide that. Idempotent.
+ */
+static void release_consumer_resources(display_ctx *ctx)
+{
+    release_dmabufs(ctx);
 
     if (ctx->data_fd >= 0)          { close(ctx->data_fd);          ctx->data_fd = -1; }
     if (ctx->buf_ready_efd >= 0)    { close(ctx->buf_ready_efd);    ctx->buf_ready_efd = -1; }
@@ -121,17 +126,19 @@ static int pickup_fds(display_ctx *ctx)
  * fd handshake. Polls data_fd with a short timeout. On failure the caller releases
  * the partially-acquired consumer resources. Returns 0 / -1.
  */
-static int receive_dmabufs(display_ctx *ctx)
+static void release_dmabufs(display_ctx *ctx)
 {
-    if (ctx->buf_count > 0)
-        return 0;
+    for (int i = 0; i < ctx->buf_count; i++) {
+        if (ctx->dmabuf_fds[i] >= 0) {
+            close(ctx->dmabuf_fds[i]);
+            ctx->dmabuf_fds[i] = -1;
+        }
+    }
+    ctx->buf_count = 0;
+}
 
-    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN | POLLHUP | POLLERR };
-    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
-        return -1;
-    if (pfd.revents & (POLLHUP | POLLERR))
-        return -1;
-
+static int receive_dmabufs_internal(display_ctx *ctx)
+{
     struct data_msg dhdr;
     int fds[MAX_BUFS];
     int fd_count = 0;
@@ -160,12 +167,24 @@ static int receive_dmabufs(display_ctx *ctx)
         return -1;
     }
 
+    release_dmabufs(ctx);
     for (int i = 0; i < count; i++) {
         ctx->dmabuf_fds[i] = fds[i];
         ctx->dmabuf_infos[i] = infos[i];
     }
     ctx->buf_count = count;
     return 0;
+}
+
+static int receive_dmabufs(display_ctx *ctx)
+{
+    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN | POLLHUP | POLLERR };
+    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
+        return -1;
+    if (pfd.revents & (POLLHUP | POLLERR))
+        return -1;
+
+    return receive_dmabufs_internal(ctx);
 }
 
 int connect_to_deamon(display_ctx **out, const char *socket_path)
@@ -328,6 +347,10 @@ int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
 
     struct data_msg hdr;
     memcpy(&hdr, msg_buf, sizeof(hdr));
+    if (hdr.type == DATA_MSG_BUFS_READY) {
+        receive_dmabufs_internal(ctx);
+        return 0;
+    }
     if (hdr.type != DATA_MSG_INPUT_EVENT)
         return 0;
 
