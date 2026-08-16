@@ -288,6 +288,7 @@ public class MainActivity extends Activity
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        Log.w("AnlandTouch", "windowFocusChanged hasFocus=" + hasFocus);
         if (!isSocketFile(resolveSocketPath())) {
             //exit
             android.widget.Toast.makeText(this, "Deamon Down",
@@ -562,6 +563,8 @@ public class MainActivity extends Activity
         FrameLayout root = new FrameLayout(this) {
             @Override
             public boolean dispatchCapturedPointerEvent(MotionEvent event) {
+                Log.w("AnlandTouch", "dispatchCapturedPointer action=" + event.getActionMasked()
+                        + " src=" + event.getSource() + " imeVisible=" + (mImeBottom > 0));
                 if (handleCapturedPointerEvent(event))
                     return true;
                 return super.dispatchCapturedPointerEvent(event);
@@ -569,6 +572,8 @@ public class MainActivity extends Activity
 
             @Override
             public void dispatchPointerCaptureChanged(boolean hasCapture) {
+                Log.w("AnlandTouch", "pointerCaptureChanged hasCapture=" + hasCapture
+                        + " imeVisible=" + (mImeBottom > 0));
                 super.dispatchPointerCaptureChanged(hasCapture);
                 if (!hasCapture) {
                     releaseAllMouseButtons();
@@ -785,6 +790,8 @@ public class MainActivity extends Activity
 
         @Override
         public void onMotion(float dx, float dy) {
+            Log.w("AnlandPtr", "touchpad.onMotion dx=" + dx + " dy=" + dy
+                    + " emit=" + emitMotion + " ime=" + (mImeBottom > 0));
             if (emitMotion)
                 movePointerBy(dx, dy);
         }
@@ -1456,8 +1463,11 @@ public class MainActivity extends Activity
      */
     private void movePointerBy(float dx, float dy) {
         if (!Float.isFinite(dx) || !Float.isFinite(dy)
-                || (dx == 0f && dy == 0f))
+                || (dx == 0f && dy == 0f)) {
+            Log.w("AnlandPtr", "movePointerBy skipped dx=" + dx + " dy=" + dy
+                    + " ime=" + (mImeBottom > 0) + " native=" + (mNative != null));
             return;
+        }
         ensurePointerPosition();
         int width = pointerViewWidth();
         int height = pointerViewHeight();
@@ -1474,6 +1484,9 @@ public class MainActivity extends Activity
         // (scaled into the output coordinate space).  This is important for games:
         // movement continues to be reported even while the virtual cursor is at an
         // output edge.
+        Log.w("AnlandPtr", "move dx=" + dx + " dy=" + dy + " ime=" + (mImeBottom > 0)
+                + " view=" + width + "x" + height + " panSize=" + pointerViewWidth()
+                + "x" + pointerViewHeight() + " mNative=" + (mNative != null));
         mNative.sendMouseMotion((pointerX - originX) * scaleX,
                 (pointerY - originY) * scaleY,
                 dx * scaleX, dy * scaleY);
@@ -2193,6 +2206,9 @@ public class MainActivity extends Activity
         if (isTouchpadMode && !mouseEvent) {
             // Bounds are refreshed here as well as in surfaceChanged: the IME inset
             // resizes the surface without going through it on every path.
+            Log.w("AnlandTouch", "onTouchEvent action=" + event.getActionMasked()
+                    + " pc=" + event.getPointerCount() + " hasWindowFocus=" + hasWindowFocus()
+                    + " imeVisible=" + (mImeBottom > 0));
             updateTouchpadBounds(null);
             screenTouchpad.onTouch(event);
             return true;
@@ -2212,6 +2228,8 @@ public class MainActivity extends Activity
     @Override
     public boolean onGenericMotionEvent(MotionEvent event) {
         if (isMouseEvent(event)) {
+            Log.w("AnlandTouch", "genericMotion src=" + event.getSource()
+                    + " action=" + event.getActionMasked() + " imeVisible=" + (mImeBottom > 0));
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_BUTTON_PRESS
                     && pointerCaptureWanted() && mRoot != null
