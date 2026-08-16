@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -431,17 +432,23 @@ int try_exit_fallback(display_ctx *ctx)
 
     // Step 1: ask the daemon to hand over the consumer-side fds.
     if (pickup_fds(ctx) < 0) {
+        fprintf(stderr, "anland: try_exit_fallback FAILED at pickup_fds (errno=%d %s)\n",
+                errno, strerror(errno));
         release_consumer_resources(ctx);
         return -1;
     }
+    fprintf(stderr, "anland: pickup_fds ok, data_fd=%d\n", ctx->data_fd);
 
     // Step 2: immediately pull the dmabuf set the consumer pushes right after the
     // fd handshake. Only leave fallback once both fds and dmabufs are in hand, so
     // the backend can import straight away.
     if (receive_dmabufs(ctx) < 0) {
+        fprintf(stderr, "anland: try_exit_fallback FAILED at receive_dmabufs (errno=%d %s)\n",
+                errno, strerror(errno));
         release_consumer_resources(ctx);
         return -1;
     }
+    fprintf(stderr, "anland: receive_dmabufs ok, buf_count=%d\n", ctx->buf_count);
 
     ctx->fallback = false;
     return 0;
