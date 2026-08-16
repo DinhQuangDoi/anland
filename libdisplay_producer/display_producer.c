@@ -291,10 +291,17 @@ int trigger_refresh(display_ctx *ctx)
         c->cmsg_len = CMSG_LEN(sizeof(int));
         memcpy(CMSG_DATA(c), &ctx->pending_render_fence, sizeof(int));
     }
-    sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
+    ssize_t sent = sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
     if (ctx->pending_render_fence >= 0) {
         close(ctx->pending_render_fence);
         ctx->pending_render_fence = -1;
+    }
+    if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        /* The consumer closed its end of the fence channel (fell back, stopped, or
+         * restarted for a rotation/resize): the connection is dead. Enter fallback
+         * so the backend's reconnect path re-picks-up the consumer's fresh fds. */
+        enter_fallback(ctx);
+        return -1;
     }
     return 0;
 }
@@ -393,6 +400,28 @@ int set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *u
 bool is_fallback(display_ctx *ctx)
 {
     return ctx->fallback;
+}
+
+
+/* True while the consumer link looks alive: the data channel has no HUP/ERR.
+ * Cheap non-blocking check for the backend's periodic watchdog, so a consumer
+ * that dies while the producer is idle is detected even without any renders. */
+bool peer_alive(display_ctx *ctx)
+{
+    if (ctx->fallback || ctx->data_fd < 0)
+        return false;
+    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
+    int ret = poll(&pfd, 1, 0);
+    if (ret < 0)
+        return false;
+    return !(pfd.revents & (POLLHUP | POLLERR));
+}
+
+/* Force the context into fallback so the backend's reconnect path re-picks-up
+ * the consumer's fresh fds (used when the watchdog detects a dead link). */
+void force_fallback(display_ctx *ctx)
+{
+    enter_fallback(ctx);
 }
 
 int try_exit_fallback(display_ctx *ctx)
