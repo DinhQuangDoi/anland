@@ -338,8 +338,24 @@ impl Anland {
             self.ctx.screen_info().height,
         );
 
+        // Drop any sources registered by a previous connection before installing
+        // the fresh fds. On reconnect the C context closes the old buffer-ready and
+        // data fds; if we kept the old FdEventSources registered, the event loop
+        // would hold descriptors that are now closed (their numbers may even be
+        // recycled for unrelated fds), producing stale redraws/reads and sporadic
+        // black frames. remove_source is idempotent for an unset token.
+        self.remove_event_sources(niri);
         self.register_buffer_ready_source(niri);
         self.register_input_source(niri);
+    }
+
+    fn remove_event_sources(&mut self, niri: &mut Niri) {
+        if let Some(token) = self.buf_ready_source_token.take() {
+            niri.event_loop.remove(token);
+        }
+        if let Some(token) = self.data_source_token.take() {
+            niri.event_loop.remove(token);
+        }
     }
 
     fn import_raw_dmabuf(
