@@ -1592,7 +1592,13 @@ public class MainActivity extends Activity
         // and registers SERVICE_TYPE_CAMERA on the very first connect rather than a
         // later reconnect. Idempotent, so safe to call on every resume.
         applyCameraState();
-        if (surfaceReady && !nativeStarted) {
+        // Force a re-hello on every resume, even if native is already started.
+        // When the app is sent to the background and back, the surface may be
+        // retained (no recreate), so without an explicit stop+start the consumer
+        // never re-registers with the daemon and the producer stays stuck in
+        // fallback -> alternate black screens. scheduleNativeTransition collapses
+        // the stop+start into one worker pass.
+        if (surfaceReady) {
             applyConnectionConfig();
             startNative(surfaceView.getHolder().getSurface());
             pushRefreshRate();
